@@ -3,73 +3,20 @@ use std::fs;
 use std::path::PathBuf;
 use syn::{visit::Visit, File, LitStr};
 
-/// CLI tool that extracts string literals from Rust source files and provides detailed 
-/// word-by-word character span information. Designed for use with Large Language 
-/// Models (LLMs) that need precise character positioning data for code analysis.
+/// Extract word-by-word character spans from string literals in Rust source files
 ///
-/// The tool:
-/// 1. Parses the specified Rust file using syn
-/// 2. Locates string literals on the given line number
-/// 3. Splits the string content into individual words
-/// 4. Returns character span information for each word
-///
-/// # Examples
-///
-/// Given a Rust file 'example.rs':
-/// ```rust
-/// fn main() {
-///     let s = "hello world test";
-///     let t = "foo bar baz";
-/// }
-/// ```
-///
-/// ```bash
-/// $ rust-span-counter example.rs 2
+/// Example: For line `let s = "hello world";` outputs:
 /// "hello" | 0-5
 /// "world" | 6-11
-/// "test" | 12-16
-///
-/// $ rust-span-counter example.rs 3  
-/// "foo" | 0-3
-/// "bar" | 4-7
-/// "baz" | 8-11
-/// ```
-///
-/// # Output Format
-///
-/// The output format is: `"word" | start_pos-end_pos`
-/// - `start_pos`: 0-based character index where the word begins in the string
-/// - `end_pos`: 0-based character index where the word ends in the string
-///
-/// # Supported String Types
-///
-/// - Regular strings: `"hello world"`
-/// - Raw strings: `r"hello world"`  
-/// - Strings with escapes: `"foo \"bar\" baz"`
-///
-/// # Error Conditions
-///
-/// - No string found on line: Returns 'No string found on the specified line'
-/// - Multiple strings on line: Returns 'Multiple strings found on the same line'
-/// - Invalid file: Returns 'File error' or 'Parse error'
 #[derive(Parser)]
 #[command(name = "rust-span-counter")]
 #[command(about = "Extracts strings from Rust files and provides word-by-word character spans")]
 struct Args {
-    /// Path to the Rust source file to analyze (.rs file)
-    /// 
-    /// The file must be valid Rust code that can be parsed by the syn crate.
-    /// Both relative and absolute paths are supported.
+    /// Path to the Rust source file (.rs)
     #[arg(value_name = "FILE")]
     file_path: PathBuf,
     
-    /// Line number containing the string literal to analyze (1-based indexing)
-    /// 
-    /// Must be a positive integer corresponding to a line in the file that contains
-    /// exactly one string literal. The tool will error if:
-    /// - Line number is 0 or exceeds the file length
-    /// - No string literal is found on the specified line  
-    /// - Multiple string literals are found on the same line
+    /// Line number containing the string literal (1-based)
     #[arg(value_name = "LINE_NUM")]
     line_number: usize,
 }
