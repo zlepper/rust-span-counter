@@ -94,9 +94,10 @@ impl StringVisitor {
 impl<'ast> Visit<'ast> for StringVisitor {
     fn visit_lit_str(&mut self, lit_str: &'ast LitStr) {
         let span = lit_str.span();
-        let line = span.start().line;
+        let start_line = span.start().line;
+        let end_line = span.end().line;
         
-        if line == self.target_line {
+        if self.target_line >= start_line && self.target_line <= end_line {
             self.found_strings.push(lit_str.value());
         }
     }
@@ -354,5 +355,106 @@ mod tests {
             WordSpan { word: "bar".to_string(), start: 4, end: 7 },
             WordSpan { word: "baz".to_string(), start: 8, end: 11 }
         ]);
+    }
+
+    #[test]
+    fn test_multiline_string_multiple_lines() {
+        let test_file_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-files")
+            .join("multiline.rs");
+        
+        let expected_spans = vec![
+            WordSpan { word: "this".to_string(), start: 0, end: 4 },
+            WordSpan { word: "is".to_string(), start: 5, end: 7 },
+            WordSpan { word: "a".to_string(), start: 8, end: 9 },
+            WordSpan { word: "multiline".to_string(), start: 23, end: 32 },
+            WordSpan { word: "string".to_string(), start: 33, end: 39 },
+            WordSpan { word: "with".to_string(), start: 40, end: 44 },
+            WordSpan { word: "multiple".to_string(), start: 58, end: 66 },
+            WordSpan { word: "words".to_string(), start: 67, end: 72 },
+            WordSpan { word: "per".to_string(), start: 73, end: 76 },
+            WordSpan { word: "line".to_string(), start: 77, end: 81 }
+        ];
+
+        // Test that all lines covered by the multiline string return the same result
+        for line_number in [2, 3, 4] {
+            let args = Args {
+                file_path: test_file_path.clone(),
+                line_number,
+            };
+            
+            let spans = process_file(&args).unwrap();
+            assert_eq!(spans, expected_spans, "Failed for line {}", line_number);
+        }
+    }
+
+    #[test]
+    fn test_multiline_raw_string_multiple_lines() {
+        let test_file_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-files")
+            .join("multiline_raw.rs");
+        
+        let expected_spans = vec![
+            WordSpan { word: "this".to_string(), start: 0, end: 4 },
+            WordSpan { word: "is".to_string(), start: 5, end: 7 },
+            WordSpan { word: "a".to_string(), start: 8, end: 9 },
+            WordSpan { word: "raw".to_string(), start: 10, end: 13 },
+            WordSpan { word: "multiline".to_string(), start: 29, end: 38 },
+            WordSpan { word: "string".to_string(), start: 39, end: 45 },
+            WordSpan { word: "with".to_string(), start: 46, end: 50 },
+            WordSpan { word: "special".to_string(), start: 66, end: 73 },
+            WordSpan { word: "\"quotes\"".to_string(), start: 74, end: 82 },
+            WordSpan { word: "and".to_string(), start: 83, end: 86 },
+            WordSpan { word: "symbols".to_string(), start: 87, end: 94 }
+        ];
+
+        // Test that all lines covered by the multiline raw string return the same result
+        for line_number in [2, 3, 4] {
+            let args = Args {
+                file_path: test_file_path.clone(),
+                line_number,
+            };
+            
+            let spans = process_file(&args).unwrap();
+            assert_eq!(spans, expected_spans, "Failed for raw string line {}", line_number);
+        }
+    }
+
+    #[test]
+    fn test_single_line_on_multiline_file() {
+        let test_file_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-files")
+            .join("multiline.rs");
+        
+        let args = Args {
+            file_path: test_file_path,
+            line_number: 5,
+        };
+        
+        let spans = process_file(&args).unwrap();
+        
+        // Should find the single line string on line 5
+        assert_eq!(spans, vec![
+            WordSpan { word: "single".to_string(), start: 0, end: 6 },
+            WordSpan { word: "line".to_string(), start: 7, end: 11 },
+            WordSpan { word: "string".to_string(), start: 12, end: 18 }
+        ]);
+    }
+
+    #[test]
+    fn test_no_string_on_multiline_boundary() {
+        let test_file_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-files")
+            .join("multiline.rs");
+        
+        let args = Args {
+            file_path: test_file_path,
+            line_number: 1,
+        };
+        
+        let result = process_file(&args);
+        
+        // Should return NoStringFound error for line 1 (fn main() line)
+        assert!(matches!(result, Err(Error::NoStringFound)));
     }
 }
