@@ -2,6 +2,7 @@ use clap::Parser;
 use std::fs;
 use std::path::PathBuf;
 use syn::{visit::Visit, File, LitStr};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Extract word-by-word character spans from string literals in Rust source files
 ///
@@ -117,24 +118,19 @@ impl std::fmt::Display for WordSpan {
 }
 
 fn get_word_spans(string_content: &str) -> Result<Vec<WordSpan>, Error> {
-    let words: Vec<&str> = string_content.split_whitespace().collect();
     let mut spans = Vec::new();
-    let mut current_pos = 0;
+    let mut byte_pos = 0;
     
-    for word in words {
-        // Find the word in the remaining string to handle multiple spaces correctly
-        if let Some(word_start) = string_content[current_pos..].find(word) {
-            let absolute_start = current_pos + word_start;
-            let absolute_end = absolute_start + word.len();
-            
+    for segment in string_content.split_word_bounds() {
+        // Only include non-whitespace segments as tokens
+        if !segment.chars().all(|c| c.is_whitespace()) {
             spans.push(WordSpan {
-                word: word.to_string(),
-                start: absolute_start,
-                end: absolute_end,
+                word: segment.to_string(),
+                start: byte_pos,
+                end: byte_pos + segment.len(),
             });
-            
-            current_pos = absolute_end;
         }
+        byte_pos += segment.len();
     }
     
     Ok(spans)
@@ -332,7 +328,9 @@ mod tests {
         
         assert_eq!(spans, vec![
             WordSpan { word: "foo".to_string(), start: 0, end: 3 },
-            WordSpan { word: "\"bar\"".to_string(), start: 4, end: 9 },
+            WordSpan { word: "\"".to_string(), start: 4, end: 5 },
+            WordSpan { word: "bar".to_string(), start: 5, end: 8 },
+            WordSpan { word: "\"".to_string(), start: 8, end: 9 },
             WordSpan { word: "baz".to_string(), start: 10, end: 13 }
         ]);
     }
@@ -403,7 +401,9 @@ mod tests {
             WordSpan { word: "string".to_string(), start: 39, end: 45 },
             WordSpan { word: "with".to_string(), start: 46, end: 50 },
             WordSpan { word: "special".to_string(), start: 66, end: 73 },
-            WordSpan { word: "\"quotes\"".to_string(), start: 74, end: 82 },
+            WordSpan { word: "\"".to_string(), start: 74, end: 75 },
+            WordSpan { word: "quotes".to_string(), start: 75, end: 81 },
+            WordSpan { word: "\"".to_string(), start: 81, end: 82 },
             WordSpan { word: "and".to_string(), start: 83, end: 86 },
             WordSpan { word: "symbols".to_string(), start: 87, end: 94 }
         ];
@@ -456,5 +456,74 @@ mod tests {
         
         // Should return NoStringFound error for line 1 (fn main() line)
         assert!(matches!(result, Err(Error::NoStringFound)));
+    }
+
+    #[test]
+    fn test_punctuation_tokenization() {
+        let content = "default(nextval(user_id_seq)),";
+        let spans = get_word_spans(content).unwrap();
+        
+        assert_eq!(spans, vec![
+            WordSpan { word: "default".to_string(), start: 0, end: 7 },
+            WordSpan { word: "(".to_string(), start: 7, end: 8 },
+            WordSpan { word: "nextval".to_string(), start: 8, end: 15 },
+            WordSpan { word: "(".to_string(), start: 15, end: 16 },
+            WordSpan { word: "user_id_seq".to_string(), start: 16, end: 27 },
+            WordSpan { word: ")".to_string(), start: 27, end: 28 },
+            WordSpan { word: ")".to_string(), start: 28, end: 29 },
+            WordSpan { word: ",".to_string(), start: 29, end: 30 },
+        ]);
+    }
+
+    #[test]
+    fn test_mixed_punctuation_and_whitespace() {
+        let content = "hello, world! how are you?";
+        let spans = get_word_spans(content).unwrap();
+        
+        assert_eq!(spans, vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: ",".to_string(), start: 5, end: 6 },
+            WordSpan { word: "world".to_string(), start: 7, end: 12 },
+            WordSpan { word: "!".to_string(), start: 12, end: 13 },
+            WordSpan { word: "how".to_string(), start: 14, end: 17 },
+            WordSpan { word: "are".to_string(), start: 18, end: 21 },
+            WordSpan { word: "you".to_string(), start: 22, end: 25 },
+            WordSpan { word: "?".to_string(), start: 25, end: 26 },
+        ]);
+    }
+
+    #[test]
+    fn test_sql_like_expression() {
+        let content = "SELECT * FROM table WHERE id=42;";
+        let spans = get_word_spans(content).unwrap();
+        
+        assert_eq!(spans, vec![
+            WordSpan { word: "SELECT".to_string(), start: 0, end: 6 },
+            WordSpan { word: "*".to_string(), start: 7, end: 8 },
+            WordSpan { word: "FROM".to_string(), start: 9, end: 13 },
+            WordSpan { word: "table".to_string(), start: 14, end: 19 },
+            WordSpan { word: "WHERE".to_string(), start: 20, end: 25 },
+            WordSpan { word: "id".to_string(), start: 26, end: 28 },
+            WordSpan { word: "=".to_string(), start: 28, end: 29 },
+            WordSpan { word: "42".to_string(), start: 29, end: 31 },
+            WordSpan { word: ";".to_string(), start: 31, end: 32 },
+        ]);
+    }
+
+    #[test]
+    fn test_brackets_and_operators() {
+        let content = "array[index]+value*2";
+        let spans = get_word_spans(content).unwrap();
+        
+        assert_eq!(spans, vec![
+            WordSpan { word: "array".to_string(), start: 0, end: 5 },
+            WordSpan { word: "[".to_string(), start: 5, end: 6 },
+            WordSpan { word: "index".to_string(), start: 6, end: 11 },
+            WordSpan { word: "]".to_string(), start: 11, end: 12 },
+            WordSpan { word: "+".to_string(), start: 12, end: 13 },
+            WordSpan { word: "value".to_string(), start: 13, end: 18 },
+            WordSpan { word: "*".to_string(), start: 18, end: 19 },
+            WordSpan { word: "2".to_string(), start: 19, end: 20 },
+        ]);
     }
 }
