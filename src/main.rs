@@ -1,25 +1,37 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::fs;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use syn::{visit::Visit, File, LitStr};
 use unicode_segmentation::UnicodeSegmentation;
 
-/// Extract word-by-word character spans from string literals in Rust source files
-///
-/// Example: For line `let s = "hello world";` outputs:
-/// "hello" | 0-5
-/// "world" | 6-11
+/// Extract word-by-word character spans from string literals
 #[derive(Parser)]
 #[command(name = "rust-span-counter")]
-#[command(about = "Extracts strings from Rust files and provides word-by-word character spans")]
+#[command(about = "Extracts strings and provides word-by-word character spans")]
 struct Args {
-    /// Path to the Rust source file (.rs)
-    #[arg(value_name = "FILE")]
-    file_path: PathBuf,
-    
-    /// Line number containing the string literal (1-based)
-    #[arg(value_name = "LINE_NUM")]
-    line_number: usize,
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Extract spans from a string literal in a Rust source file
+    File {
+        /// Path to the Rust source file (.rs)
+        #[arg(value_name = "FILE")]
+        file_path: PathBuf,
+        
+        /// Line number containing the string literal (1-based)
+        #[arg(value_name = "LINE_NUM")]
+        line_number: usize,
+    },
+    /// Extract spans from raw string content
+    String {
+        /// String content to process, or use "--" to read from stdin
+        #[arg(value_name = "CONTENT")]
+        content: Option<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -45,7 +57,15 @@ impl std::error::Error for Error {}
 
 fn main() -> Result<(), Error> {
     let args = Args::parse();
-    let spans = process_file(&args)?;
+    
+    let spans = match &args.command {
+        Commands::File { file_path, line_number } => {
+            handle_file_command(file_path, *line_number)?
+        }
+        Commands::String { content } => {
+            handle_string_command(content.as_deref())?
+        }
+    };
     
     // Print the results
     for span in spans {
@@ -55,16 +75,38 @@ fn main() -> Result<(), Error> {
     Ok(())
 }
 
-fn process_file(args: &Args) -> Result<Vec<WordSpan>, Error> {
+fn handle_file_command(file_path: &PathBuf, line_number: usize) -> Result<Vec<WordSpan>, Error> {
     // Read and parse the file
-    let content = fs::read_to_string(&args.file_path).map_err(Error::IoError)?;
+    let content = fs::read_to_string(file_path).map_err(Error::IoError)?;
     let file = syn::parse_file(&content).map_err(Error::ParseError)?;
     
     // Find string literals on the target line
-    let string_literals = find_strings_on_line(&file, args.line_number)?;
+    let string_literals = find_strings_on_line(&file, line_number)?;
     
     // Process the string and return word spans
     get_word_spans(&string_literals)
+}
+
+fn handle_string_command(content: Option<&str>) -> Result<Vec<WordSpan>, Error> {
+    let input = match content {
+        Some("--") => {
+            // Read from stdin
+            read_from_stdin()?
+        }
+        Some(content) => content.to_string(),
+        None => {
+            // No content provided, read from stdin
+            read_from_stdin()?
+        }
+    };
+    
+    get_word_spans(&input)
+}
+
+fn read_from_stdin() -> Result<String, Error> {
+    let mut buffer = String::new();
+    io::stdin().read_to_string(&mut buffer).map_err(Error::IoError)?;
+    Ok(buffer)
 }
 
 fn find_strings_on_line(file: &File, target_line: usize) -> Result<String, Error> {
@@ -279,12 +321,7 @@ mod tests {
             .join("test-files")
             .join("simple.rs");
         
-        let args = Args {
-            file_path: test_file_path,
-            line_number: 2,
-        };
-        
-        let spans = process_file(&args).unwrap();
+        let spans = handle_file_command(&test_file_path, 2).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "hello".to_string(), start: 0, end: 5 },
@@ -299,12 +336,7 @@ mod tests {
             .join("test-files")
             .join("raw_string.rs");
         
-        let args = Args {
-            file_path: test_file_path,
-            line_number: 2,
-        };
-        
-        let spans = process_file(&args).unwrap();
+        let spans = handle_file_command(&test_file_path, 2).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "raw".to_string(), start: 0, end: 3 },
@@ -319,12 +351,7 @@ mod tests {
             .join("test-files")
             .join("escaped.rs");
         
-        let args = Args {
-            file_path: test_file_path,
-            line_number: 2,
-        };
-        
-        let spans = process_file(&args).unwrap();
+        let spans = handle_file_command(&test_file_path, 2).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "foo".to_string(), start: 0, end: 3 },
@@ -341,12 +368,7 @@ mod tests {
             .join("test-files")
             .join("simple.rs");
         
-        let args = Args {
-            file_path: test_file_path,
-            line_number: 3,
-        };
-        
-        let spans = process_file(&args).unwrap();
+        let spans = handle_file_command(&test_file_path, 3).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "foo".to_string(), start: 0, end: 3 },
@@ -376,12 +398,7 @@ mod tests {
 
         // Test that all lines covered by the multiline string return the same result
         for line_number in [2, 3, 4] {
-            let args = Args {
-                file_path: test_file_path.clone(),
-                line_number,
-            };
-            
-            let spans = process_file(&args).unwrap();
+            let spans = handle_file_command(&test_file_path, line_number).unwrap();
             assert_eq!(spans, expected_spans, "Failed for line {}", line_number);
         }
     }
@@ -410,12 +427,7 @@ mod tests {
 
         // Test that all lines covered by the multiline raw string return the same result
         for line_number in [2, 3, 4] {
-            let args = Args {
-                file_path: test_file_path.clone(),
-                line_number,
-            };
-            
-            let spans = process_file(&args).unwrap();
+            let spans = handle_file_command(&test_file_path, line_number).unwrap();
             assert_eq!(spans, expected_spans, "Failed for raw string line {}", line_number);
         }
     }
@@ -426,12 +438,7 @@ mod tests {
             .join("test-files")
             .join("multiline.rs");
         
-        let args = Args {
-            file_path: test_file_path,
-            line_number: 5,
-        };
-        
-        let spans = process_file(&args).unwrap();
+        let spans = handle_file_command(&test_file_path, 5).unwrap();
         
         // Should find the single line string on line 5
         assert_eq!(spans, vec![
@@ -447,12 +454,7 @@ mod tests {
             .join("test-files")
             .join("multiline.rs");
         
-        let args = Args {
-            file_path: test_file_path,
-            line_number: 1,
-        };
-        
-        let result = process_file(&args);
+        let result = handle_file_command(&test_file_path, 1);
         
         // Should return NoStringFound error for line 1 (fn main() line)
         assert!(matches!(result, Err(Error::NoStringFound)));
@@ -524,6 +526,47 @@ mod tests {
             WordSpan { word: "value".to_string(), start: 13, end: 18 },
             WordSpan { word: "*".to_string(), start: 18, end: 19 },
             WordSpan { word: "2".to_string(), start: 19, end: 20 },
+        ]);
+    }
+
+    #[test]
+    fn test_string_subcommand_with_content() {
+        let spans = handle_string_command(Some("hello world")).unwrap();
+        
+        assert_eq!(spans, vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "world".to_string(), start: 6, end: 11 }
+        ]);
+    }
+
+    #[test]
+    fn test_string_subcommand_empty_string() {
+        let spans = handle_string_command(Some("")).unwrap();
+        
+        assert_eq!(spans, vec![]);
+    }
+
+    #[test]
+    fn test_string_subcommand_punctuation() {
+        let spans = handle_string_command(Some("hello, world!")).unwrap();
+        
+        assert_eq!(spans, vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: ",".to_string(), start: 5, end: 6 },
+            WordSpan { word: "world".to_string(), start: 7, end: 12 },
+            WordSpan { word: "!".to_string(), start: 12, end: 13 }
+        ]);
+    }
+
+    #[test]
+    fn test_string_subcommand_multiline_content() {
+        let content = "hello\nworld\ntest";
+        let spans = handle_string_command(Some(content)).unwrap();
+        
+        assert_eq!(spans, vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "world".to_string(), start: 6, end: 11 },
+            WordSpan { word: "test".to_string(), start: 12, end: 16 }
         ]);
     }
 }
