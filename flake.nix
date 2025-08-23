@@ -19,7 +19,7 @@
         {
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "rust-span-counter";
-            version = "0.1.0";
+            version = (pkgs.lib.importTOML ./Cargo.toml).package.version;
 
             src = ./.;
 
