@@ -10,6 +10,10 @@ use unicode_segmentation::UnicodeSegmentation;
 #[command(name = "rust-span-counter")]
 #[command(about = "Extracts strings and provides word-by-word character spans")]
 struct Args {
+    /// Treat quoted strings as single tokens (preserving quote boundaries)
+    #[arg(long, help = "Treat quoted content (\"...\", '...', `...`) as single tokens")]
+    strings_as_tokens: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -58,7 +62,7 @@ impl std::error::Error for Error {}
 fn main() -> Result<(), Error> {
     let args = Args::parse();
     
-    let spans = match &args.command {
+    let string_content = match &args.command {
         Commands::File { file_path, line_number } => {
             handle_file_command(file_path, *line_number)?
         }
@@ -66,6 +70,8 @@ fn main() -> Result<(), Error> {
             handle_string_command(content.as_deref())?
         }
     };
+    
+    let spans = get_word_spans(&string_content, args.strings_as_tokens)?;
     
     // Print the results
     for span in spans {
@@ -75,19 +81,16 @@ fn main() -> Result<(), Error> {
     Ok(())
 }
 
-fn handle_file_command(file_path: &PathBuf, line_number: usize) -> Result<Vec<WordSpan>, Error> {
+fn handle_file_command(file_path: &PathBuf, line_number: usize) -> Result<String, Error> {
     // Read and parse the file
     let content = fs::read_to_string(file_path).map_err(Error::IoError)?;
     let file = syn::parse_file(&content).map_err(Error::ParseError)?;
     
-    // Find string literals on the target line
-    let string_literals = find_strings_on_line(&file, line_number)?;
-    
-    // Process the string and return word spans
-    get_word_spans(&string_literals)
+    // Find string literals on the target line and return the content
+    find_strings_on_line(&file, line_number)
 }
 
-fn handle_string_command(content: Option<&str>) -> Result<Vec<WordSpan>, Error> {
+fn handle_string_command(content: Option<&str>) -> Result<String, Error> {
     let input = match content {
         Some("--") => {
             // Read from stdin
@@ -100,7 +103,7 @@ fn handle_string_command(content: Option<&str>) -> Result<Vec<WordSpan>, Error> 
         }
     };
     
-    get_word_spans(&input)
+    Ok(input)
 }
 
 fn read_from_stdin() -> Result<String, Error> {
@@ -159,7 +162,15 @@ impl std::fmt::Display for WordSpan {
     }
 }
 
-fn get_word_spans(string_content: &str) -> Result<Vec<WordSpan>, Error> {
+fn get_word_spans(string_content: &str, strings_as_tokens: bool) -> Result<Vec<WordSpan>, Error> {
+    if strings_as_tokens {
+        get_word_spans_with_quoted_strings(string_content)
+    } else {
+        get_word_spans_default(string_content)
+    }
+}
+
+fn get_word_spans_default(string_content: &str) -> Result<Vec<WordSpan>, Error> {
     let mut spans = Vec::new();
     let mut byte_pos = 0;
     
@@ -178,6 +189,81 @@ fn get_word_spans(string_content: &str) -> Result<Vec<WordSpan>, Error> {
     Ok(spans)
 }
 
+fn get_word_spans_with_quoted_strings(string_content: &str) -> Result<Vec<WordSpan>, Error> {
+    let mut spans = Vec::new();
+    let chars: Vec<char> = string_content.chars().collect();
+    let mut i = 0;
+    
+    while i < chars.len() {
+        let ch = chars[i];
+        
+        // Check if we're starting a quoted string
+        if ch == '"' || ch == '\'' || ch == '`' {
+            let quote_char = ch;
+            let quote_start = i;
+            i += 1; // Move past opening quote
+            
+            // Find the matching closing quote, handling escapes
+            while i < chars.len() {
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    // Skip escaped character
+                    i += 2;
+                } else if chars[i] == quote_char {
+                    // Found closing quote
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            
+            // Create a span for the entire quoted string (including quotes)
+            let byte_start: usize = chars[..quote_start].iter().map(|c| c.len_utf8()).sum();
+            let byte_end: usize = chars[..i].iter().map(|c| c.len_utf8()).sum();
+            let quoted_text: String = chars[quote_start..i].iter().collect();
+            
+            spans.push(WordSpan {
+                word: quoted_text,
+                start: byte_start,
+                end: byte_end,
+            });
+        } else if ch.is_whitespace() {
+            // Skip whitespace
+            i += 1;
+        } else {
+            // Handle unquoted text - find the end of this token
+            let token_start = i;
+            
+            while i < chars.len() {
+                let current = chars[i];
+                if current.is_whitespace() || current == '"' || current == '\'' || current == '`' {
+                    break;
+                }
+                i += 1;
+            }
+            
+            // Process this unquoted segment using word boundaries
+            let byte_start: usize = chars[..token_start].iter().map(|c| c.len_utf8()).sum();
+            let segment: String = chars[token_start..i].iter().collect();
+            
+            // Apply word boundary splitting to unquoted segments
+            let mut segment_byte_pos = byte_start;
+            for word_segment in segment.split_word_bounds() {
+                if !word_segment.chars().all(|c| c.is_whitespace()) {
+                    spans.push(WordSpan {
+                        word: word_segment.to_string(),
+                        start: segment_byte_pos,
+                        end: segment_byte_pos + word_segment.len(),
+                    });
+                }
+                segment_byte_pos += word_segment.len();
+            }
+        }
+    }
+    
+    Ok(spans)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -186,7 +272,7 @@ mod tests {
     #[test]
     fn test_basic_word_splitting() {
         let content = "hello world";
-        let spans = get_word_spans(content).unwrap();
+        let spans = get_word_spans(content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "hello".to_string(), start: 0, end: 5 },
@@ -197,7 +283,7 @@ mod tests {
     #[test]
     fn test_escaped_quotes() {
         let content = "foo bar";  // This simulates the parsed content of "foo \"bar"
-        let spans = get_word_spans(content).unwrap();
+        let spans = get_word_spans(content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "foo".to_string(), start: 0, end: 3 },
@@ -208,7 +294,7 @@ mod tests {
     #[test]
     fn test_single_word() {
         let content = "hello";
-        let spans = get_word_spans(content).unwrap();
+        let spans = get_word_spans(content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "hello".to_string(), start: 0, end: 5 }
@@ -218,7 +304,7 @@ mod tests {
     #[test]
     fn test_empty_string() {
         let content = "";
-        let spans = get_word_spans(content).unwrap();
+        let spans = get_word_spans(content, false).unwrap();
         
         assert_eq!(spans, vec![]);
     }
@@ -226,7 +312,7 @@ mod tests {
     #[test]
     fn test_multiple_spaces() {
         let content = "hello    world";
-        let spans = get_word_spans(content).unwrap();
+        let spans = get_word_spans(content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "hello".to_string(), start: 0, end: 5 },
@@ -237,7 +323,7 @@ mod tests {
     #[test]
     fn test_leading_trailing_spaces() {
         let content = "  hello world  ";
-        let spans = get_word_spans(content).unwrap();
+        let spans = get_word_spans(content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "hello".to_string(), start: 2, end: 7 },
@@ -321,7 +407,8 @@ mod tests {
             .join("test-files")
             .join("simple.rs");
         
-        let spans = handle_file_command(&test_file_path, 2).unwrap();
+        let content = handle_file_command(&test_file_path, 2).unwrap();
+        let spans = get_word_spans(&content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "hello".to_string(), start: 0, end: 5 },
@@ -336,7 +423,8 @@ mod tests {
             .join("test-files")
             .join("raw_string.rs");
         
-        let spans = handle_file_command(&test_file_path, 2).unwrap();
+        let content = handle_file_command(&test_file_path, 2).unwrap();
+        let spans = get_word_spans(&content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "raw".to_string(), start: 0, end: 3 },
@@ -351,7 +439,8 @@ mod tests {
             .join("test-files")
             .join("escaped.rs");
         
-        let spans = handle_file_command(&test_file_path, 2).unwrap();
+        let content = handle_file_command(&test_file_path, 2).unwrap();
+        let spans = get_word_spans(&content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "foo".to_string(), start: 0, end: 3 },
@@ -368,7 +457,8 @@ mod tests {
             .join("test-files")
             .join("simple.rs");
         
-        let spans = handle_file_command(&test_file_path, 3).unwrap();
+        let content = handle_file_command(&test_file_path, 3).unwrap();
+        let spans = get_word_spans(&content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "foo".to_string(), start: 0, end: 3 },
@@ -398,7 +488,8 @@ mod tests {
 
         // Test that all lines covered by the multiline string return the same result
         for line_number in [2, 3, 4] {
-            let spans = handle_file_command(&test_file_path, line_number).unwrap();
+            let content = handle_file_command(&test_file_path, line_number).unwrap();
+            let spans = get_word_spans(&content, false).unwrap();
             assert_eq!(spans, expected_spans, "Failed for line {}", line_number);
         }
     }
@@ -427,7 +518,8 @@ mod tests {
 
         // Test that all lines covered by the multiline raw string return the same result
         for line_number in [2, 3, 4] {
-            let spans = handle_file_command(&test_file_path, line_number).unwrap();
+            let content = handle_file_command(&test_file_path, line_number).unwrap();
+            let spans = get_word_spans(&content, false).unwrap();
             assert_eq!(spans, expected_spans, "Failed for raw string line {}", line_number);
         }
     }
@@ -438,7 +530,8 @@ mod tests {
             .join("test-files")
             .join("multiline.rs");
         
-        let spans = handle_file_command(&test_file_path, 5).unwrap();
+        let content = handle_file_command(&test_file_path, 5).unwrap();
+        let spans = get_word_spans(&content, false).unwrap();
         
         // Should find the single line string on line 5
         assert_eq!(spans, vec![
@@ -463,7 +556,7 @@ mod tests {
     #[test]
     fn test_punctuation_tokenization() {
         let content = "default(nextval(user_id_seq)),";
-        let spans = get_word_spans(content).unwrap();
+        let spans = get_word_spans(content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "default".to_string(), start: 0, end: 7 },
@@ -480,7 +573,7 @@ mod tests {
     #[test]
     fn test_mixed_punctuation_and_whitespace() {
         let content = "hello, world! how are you?";
-        let spans = get_word_spans(content).unwrap();
+        let spans = get_word_spans(content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "hello".to_string(), start: 0, end: 5 },
@@ -497,7 +590,7 @@ mod tests {
     #[test]
     fn test_sql_like_expression() {
         let content = "SELECT * FROM table WHERE id=42;";
-        let spans = get_word_spans(content).unwrap();
+        let spans = get_word_spans(content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "SELECT".to_string(), start: 0, end: 6 },
@@ -515,7 +608,7 @@ mod tests {
     #[test]
     fn test_brackets_and_operators() {
         let content = "array[index]+value*2";
-        let spans = get_word_spans(content).unwrap();
+        let spans = get_word_spans(content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "array".to_string(), start: 0, end: 5 },
@@ -531,7 +624,8 @@ mod tests {
 
     #[test]
     fn test_string_subcommand_with_content() {
-        let spans = handle_string_command(Some("hello world")).unwrap();
+        let content = handle_string_command(Some("hello world")).unwrap();
+        let spans = get_word_spans(&content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "hello".to_string(), start: 0, end: 5 },
@@ -541,14 +635,16 @@ mod tests {
 
     #[test]
     fn test_string_subcommand_empty_string() {
-        let spans = handle_string_command(Some("")).unwrap();
+        let content = handle_string_command(Some("")).unwrap();
+        let spans = get_word_spans(&content, false).unwrap();
         
         assert_eq!(spans, vec![]);
     }
 
     #[test]
     fn test_string_subcommand_punctuation() {
-        let spans = handle_string_command(Some("hello, world!")).unwrap();
+        let content = handle_string_command(Some("hello, world!")).unwrap();
+        let spans = get_word_spans(&content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "hello".to_string(), start: 0, end: 5 },
@@ -560,13 +656,148 @@ mod tests {
 
     #[test]
     fn test_string_subcommand_multiline_content() {
-        let content = "hello\nworld\ntest";
-        let spans = handle_string_command(Some(content)).unwrap();
+        let input = "hello\nworld\ntest";
+        let content = handle_string_command(Some(input)).unwrap();
+        let spans = get_word_spans(&content, false).unwrap();
         
         assert_eq!(spans, vec![
             WordSpan { word: "hello".to_string(), start: 0, end: 5 },
             WordSpan { word: "world".to_string(), start: 6, end: 11 },
             WordSpan { word: "test".to_string(), start: 12, end: 16 }
+        ]);
+    }
+
+    // Tests for the new strings-as-tokens functionality
+    #[test]
+    fn test_strings_as_tokens_double_quotes() {
+        let content = "hello \"world test\" end";
+        let spans = get_word_spans(content, true).unwrap();
+        
+        assert_eq!(spans, vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "\"world test\"".to_string(), start: 6, end: 18 },
+            WordSpan { word: "end".to_string(), start: 19, end: 22 }
+        ]);
+    }
+
+    #[test]
+    fn test_strings_as_tokens_single_quotes() {
+        let content = "hello 'world test' end";
+        let spans = get_word_spans(content, true).unwrap();
+        
+        assert_eq!(spans, vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "'world test'".to_string(), start: 6, end: 18 },
+            WordSpan { word: "end".to_string(), start: 19, end: 22 }
+        ]);
+    }
+
+    #[test]
+    fn test_strings_as_tokens_backticks() {
+        let content = "hello `world test` end";
+        let spans = get_word_spans(content, true).unwrap();
+        
+        assert_eq!(spans, vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "`world test`".to_string(), start: 6, end: 18 },
+            WordSpan { word: "end".to_string(), start: 19, end: 22 }
+        ]);
+    }
+
+    #[test]
+    fn test_strings_as_tokens_mixed_quotes() {
+        let content = "say \"hello\" and 'world' plus `test`";
+        let spans = get_word_spans(content, true).unwrap();
+        
+        assert_eq!(spans, vec![
+            WordSpan { word: "say".to_string(), start: 0, end: 3 },
+            WordSpan { word: "\"hello\"".to_string(), start: 4, end: 11 },
+            WordSpan { word: "and".to_string(), start: 12, end: 15 },
+            WordSpan { word: "'world'".to_string(), start: 16, end: 23 },
+            WordSpan { word: "plus".to_string(), start: 24, end: 28 },
+            WordSpan { word: "`test`".to_string(), start: 29, end: 35 }
+        ]);
+    }
+
+    #[test]
+    fn test_strings_as_tokens_escaped_quotes() {
+        let content = "before \"she said \\\"hello\\\" there\" after";
+        let spans = get_word_spans(content, true).unwrap();
+        
+        assert_eq!(spans, vec![
+            WordSpan { word: "before".to_string(), start: 0, end: 6 },
+            WordSpan { word: "\"she said \\\"hello\\\" there\"".to_string(), start: 7, end: 33 },
+            WordSpan { word: "after".to_string(), start: 34, end: 39 }
+        ]);
+    }
+
+    #[test]
+    fn test_strings_as_tokens_empty_quotes() {
+        let content = "before \"\" empty '' and `` after";
+        let spans = get_word_spans(content, true).unwrap();
+        
+        assert_eq!(spans, vec![
+            WordSpan { word: "before".to_string(), start: 0, end: 6 },
+            WordSpan { word: "\"\"".to_string(), start: 7, end: 9 },
+            WordSpan { word: "empty".to_string(), start: 10, end: 15 },
+            WordSpan { word: "''".to_string(), start: 16, end: 18 },
+            WordSpan { word: "and".to_string(), start: 19, end: 22 },
+            WordSpan { word: "``".to_string(), start: 23, end: 25 },
+            WordSpan { word: "after".to_string(), start: 26, end: 31 }
+        ]);
+    }
+
+    #[test]
+    fn test_strings_as_tokens_unclosed_quotes() {
+        let content = "hello \"unclosed quote and more";
+        let spans = get_word_spans(content, true).unwrap();
+        
+        // Unclosed quotes should consume the rest of the string
+        assert_eq!(spans, vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "\"unclosed quote and more".to_string(), start: 6, end: 30 }
+        ]);
+    }
+
+    #[test]
+    fn test_strings_as_tokens_vs_default_comparison() {
+        let content = "hello 'world test' end";
+        
+        // Default behavior
+        let default_spans = get_word_spans(content, false).unwrap();
+        assert_eq!(default_spans, vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "'".to_string(), start: 6, end: 7 },
+            WordSpan { word: "world".to_string(), start: 7, end: 12 },
+            WordSpan { word: "test".to_string(), start: 13, end: 17 },
+            WordSpan { word: "'".to_string(), start: 17, end: 18 },
+            WordSpan { word: "end".to_string(), start: 19, end: 22 }
+        ]);
+        
+        // Strings-as-tokens behavior
+        let token_spans = get_word_spans(content, true).unwrap();
+        assert_eq!(token_spans, vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "'world test'".to_string(), start: 6, end: 18 },
+            WordSpan { word: "end".to_string(), start: 19, end: 22 }
+        ]);
+    }
+
+    #[test]
+    fn test_strings_as_tokens_unquoted_punctuation() {
+        let content = "array[index] \"quoted text\" + value*2";
+        let spans = get_word_spans(content, true).unwrap();
+        
+        assert_eq!(spans, vec![
+            WordSpan { word: "array".to_string(), start: 0, end: 5 },
+            WordSpan { word: "[".to_string(), start: 5, end: 6 },
+            WordSpan { word: "index".to_string(), start: 6, end: 11 },
+            WordSpan { word: "]".to_string(), start: 11, end: 12 },
+            WordSpan { word: "\"quoted text\"".to_string(), start: 13, end: 26 },
+            WordSpan { word: "+".to_string(), start: 27, end: 28 },
+            WordSpan { word: "value".to_string(), start: 29, end: 34 },
+            WordSpan { word: "*".to_string(), start: 34, end: 35 },
+            WordSpan { word: "2".to_string(), start: 35, end: 36 }
         ]);
     }
 }
