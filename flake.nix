@@ -23,7 +23,7 @@
 
             src = ./.;
 
-            cargoHash = "sha256-c0X73enLVrbOikjeRwVGqxRK2Q6l4iZbYa2PSEiCyBM=";
+            cargoHash = "sha256-WgXPHJApZOucg317kU9Km3EoeBdf75P9UfCv2aYZxDY=";
 
             meta = with pkgs.lib; {
               description = "CLI tool that extracts strings from Rust files and provides word-by-word character spans";

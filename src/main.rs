@@ -1,9 +1,26 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use regex::Regex;
 use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
 use syn::{visit::Visit, File, LitStr};
 use unicode_segmentation::UnicodeSegmentation;
+
+#[derive(Clone, Debug, ValueEnum)]
+enum FilterMode {
+    /// Exact word match
+    Exact,
+    /// Word contains the filter string
+    Contains,
+    /// Word matches the regex pattern
+    Regex,
+}
+
+impl Default for FilterMode {
+    fn default() -> Self {
+        FilterMode::Exact
+    }
+}
 
 /// Extract word-by-word character spans from string literals
 #[derive(Parser)]
@@ -13,6 +30,18 @@ struct Args {
     /// Treat quoted strings as single tokens (preserving quote boundaries)
     #[arg(long, help = "Treat quoted content (\"...\", '...', `...`) as single tokens")]
     strings_as_tokens: bool,
+
+    /// Filter output to include only specified words/tokens (can be used multiple times)
+    #[arg(long = "filter", short = 'f', help = "Filter to include only specified words (can be used multiple times)")]
+    filters: Vec<String>,
+
+    /// Filter mode: exact, contains, or regex
+    #[arg(long, value_enum, default_value_t = FilterMode::Exact, help = "Filter mode: exact match, contains, or regex pattern")]
+    filter_mode: FilterMode,
+
+    /// Case-insensitive filtering
+    #[arg(long, help = "Case-insensitive filtering")]
+    ignore_case: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -44,6 +73,7 @@ enum Error {
     ParseError(syn::Error),
     NoStringFound,
     MultipleStringsFound,
+    RegexError(regex::Error),
 }
 
 impl std::fmt::Display for Error {
@@ -53,6 +83,7 @@ impl std::fmt::Display for Error {
             Error::ParseError(err) => write!(f, "Parse error: {}", err),
             Error::NoStringFound => write!(f, "No string found on the specified line"),
             Error::MultipleStringsFound => write!(f, "Multiple strings found on the same line"),
+            Error::RegexError(err) => write!(f, "Regex error: {}", err),
         }
     }
 }
@@ -72,13 +103,69 @@ fn main() -> Result<(), Error> {
     };
     
     let spans = get_word_spans(&string_content, args.strings_as_tokens)?;
+    let filtered_spans = filter_word_spans(spans, &args.filters, &args.filter_mode, args.ignore_case)?;
     
     // Print the results
-    for span in spans {
+    for span in filtered_spans {
         println!("{}", span);
     }
     
     Ok(())
+}
+
+fn filter_word_spans(spans: Vec<WordSpan>, filters: &[String], filter_mode: &FilterMode, ignore_case: bool) -> Result<Vec<WordSpan>, Error> {
+    if filters.is_empty() {
+        return Ok(spans);
+    }
+
+    match filter_mode {
+        FilterMode::Exact => {
+            let filtered = spans.into_iter()
+                .filter(|span| {
+                    filters.iter().any(|filter| {
+                        if ignore_case {
+                            span.word.to_lowercase() == filter.to_lowercase()
+                        } else {
+                            span.word == *filter
+                        }
+                    })
+                })
+                .collect();
+            Ok(filtered)
+        }
+        FilterMode::Contains => {
+            let filtered = spans.into_iter()
+                .filter(|span| {
+                    filters.iter().any(|filter| {
+                        if ignore_case {
+                            span.word.to_lowercase().contains(&filter.to_lowercase())
+                        } else {
+                            span.word.contains(filter)
+                        }
+                    })
+                })
+                .collect();
+            Ok(filtered)
+        }
+        FilterMode::Regex => {
+            let mut compiled_regexes = Vec::new();
+            for filter in filters {
+                let regex = if ignore_case {
+                    Regex::new(&format!("(?i){}", filter)).map_err(Error::RegexError)?
+                } else {
+                    Regex::new(filter).map_err(Error::RegexError)?
+                };
+                compiled_regexes.push(regex);
+            }
+            
+            let filtered = spans.into_iter()
+                .filter(|span| {
+                    compiled_regexes.iter().any(|regex| regex.is_match(&span.word))
+                })
+                .collect();
+            Ok(filtered)
+        }
+    }
 }
 
 fn handle_file_command(file_path: &PathBuf, line_number: usize) -> Result<String, Error> {
@@ -798,6 +885,208 @@ mod tests {
             WordSpan { word: "value".to_string(), start: 29, end: 34 },
             WordSpan { word: "*".to_string(), start: 34, end: 35 },
             WordSpan { word: "2".to_string(), start: 35, end: 36 }
+        ]);
+    }
+
+    // Tests for filtering functionality
+    #[test]
+    fn test_filter_exact_match() {
+        let spans = vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "world".to_string(), start: 6, end: 11 },
+            WordSpan { word: "test".to_string(), start: 12, end: 16 }
+        ];
+        
+        let filters = vec!["world".to_string()];
+        let result = filter_word_spans(spans, &filters, &FilterMode::Exact, false).unwrap();
+        
+        assert_eq!(result, vec![
+            WordSpan { word: "world".to_string(), start: 6, end: 11 }
+        ]);
+    }
+    
+    #[test]
+    fn test_filter_exact_match_multiple() {
+        let spans = vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "world".to_string(), start: 6, end: 11 },
+            WordSpan { word: "test".to_string(), start: 12, end: 16 }
+        ];
+        
+        let filters = vec!["hello".to_string(), "test".to_string()];
+        let result = filter_word_spans(spans, &filters, &FilterMode::Exact, false).unwrap();
+        
+        assert_eq!(result, vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "test".to_string(), start: 12, end: 16 }
+        ]);
+    }
+    
+    #[test]
+    fn test_filter_exact_match_case_sensitive() {
+        let spans = vec![
+            WordSpan { word: "Hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "WORLD".to_string(), start: 6, end: 11 },
+        ];
+        
+        let filters = vec!["hello".to_string()];
+        let result = filter_word_spans(spans, &filters, &FilterMode::Exact, false).unwrap();
+        
+        assert_eq!(result, vec![]); // No matches because of case sensitivity
+    }
+    
+    #[test]
+    fn test_filter_exact_match_case_insensitive() {
+        let spans = vec![
+            WordSpan { word: "Hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "WORLD".to_string(), start: 6, end: 11 },
+        ];
+        
+        let filters = vec!["hello".to_string(), "world".to_string()];
+        let result = filter_word_spans(spans, &filters, &FilterMode::Exact, true).unwrap();
+        
+        assert_eq!(result, vec![
+            WordSpan { word: "Hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "WORLD".to_string(), start: 6, end: 11 }
+        ]);
+    }
+    
+    #[test]
+    fn test_filter_contains_mode() {
+        let spans = vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "world".to_string(), start: 6, end: 11 },
+            WordSpan { word: "wonderful".to_string(), start: 12, end: 21 }
+        ];
+        
+        let filters = vec!["orl".to_string(), "nde".to_string()];
+        let result = filter_word_spans(spans, &filters, &FilterMode::Contains, false).unwrap();
+        
+        assert_eq!(result, vec![
+            WordSpan { word: "world".to_string(), start: 6, end: 11 },
+            WordSpan { word: "wonderful".to_string(), start: 12, end: 21 }
+        ]);
+    }
+    
+    #[test]
+    fn test_filter_contains_case_insensitive() {
+        let spans = vec![
+            WordSpan { word: "Hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "WORLD".to_string(), start: 6, end: 11 },
+        ];
+        
+        let filters = vec!["ell".to_string(), "orl".to_string()];
+        let result = filter_word_spans(spans, &filters, &FilterMode::Contains, true).unwrap();
+        
+        assert_eq!(result, vec![
+            WordSpan { word: "Hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "WORLD".to_string(), start: 6, end: 11 }
+        ]);
+    }
+    
+    #[test]
+    fn test_filter_regex_mode() {
+        let spans = vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "world".to_string(), start: 6, end: 11 },
+            WordSpan { word: "word".to_string(), start: 12, end: 16 },
+            WordSpan { word: "test123".to_string(), start: 17, end: 24 }
+        ];
+        
+        let filters = vec![r"wo.*d".to_string()];
+        let result = filter_word_spans(spans, &filters, &FilterMode::Regex, false).unwrap();
+        
+        assert_eq!(result, vec![
+            WordSpan { word: "world".to_string(), start: 6, end: 11 },
+            WordSpan { word: "word".to_string(), start: 12, end: 16 }
+        ]);
+    }
+    
+    #[test]
+    fn test_filter_regex_with_numbers() {
+        let spans = vec![
+            WordSpan { word: "test123".to_string(), start: 0, end: 7 },
+            WordSpan { word: "hello".to_string(), start: 8, end: 13 },
+            WordSpan { word: "world456".to_string(), start: 14, end: 22 }
+        ];
+        
+        let filters = vec![r"\d+".to_string()]; // Match words containing digits
+        let result = filter_word_spans(spans, &filters, &FilterMode::Regex, false).unwrap();
+        
+        assert_eq!(result, vec![
+            WordSpan { word: "test123".to_string(), start: 0, end: 7 },
+            WordSpan { word: "world456".to_string(), start: 14, end: 22 }
+        ]);
+    }
+    
+    #[test]
+    fn test_filter_regex_case_insensitive() {
+        let spans = vec![
+            WordSpan { word: "Hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "WORLD".to_string(), start: 6, end: 11 },
+        ];
+        
+        let filters = vec!["hello".to_string()];
+        let result = filter_word_spans(spans, &filters, &FilterMode::Regex, true).unwrap();
+        
+        assert_eq!(result, vec![
+            WordSpan { word: "Hello".to_string(), start: 0, end: 5 }
+        ]);
+    }
+    
+    #[test]
+    fn test_filter_invalid_regex() {
+        let spans = vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 }
+        ];
+        
+        let filters = vec!["[invalid".to_string()]; // Invalid regex
+        let result = filter_word_spans(spans, &filters, &FilterMode::Regex, false);
+        
+        assert!(matches!(result, Err(Error::RegexError(_))));
+    }
+    
+    #[test]
+    fn test_filter_empty_filters() {
+        let spans = vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "world".to_string(), start: 6, end: 11 }
+        ];
+        
+        let filters = vec![];
+        let result = filter_word_spans(spans.clone(), &filters, &FilterMode::Exact, false).unwrap();
+        
+        assert_eq!(result, spans); // Should return all spans when no filters
+    }
+    
+    #[test]
+    fn test_filter_no_matches() {
+        let spans = vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: "world".to_string(), start: 6, end: 11 }
+        ];
+        
+        let filters = vec!["nonexistent".to_string()];
+        let result = filter_word_spans(spans, &filters, &FilterMode::Exact, false).unwrap();
+        
+        assert_eq!(result, vec![]); // Should return empty vec when no matches
+    }
+    
+    #[test]
+    fn test_filter_with_punctuation() {
+        let spans = vec![
+            WordSpan { word: "hello".to_string(), start: 0, end: 5 },
+            WordSpan { word: ",".to_string(), start: 5, end: 6 },
+            WordSpan { word: "world".to_string(), start: 7, end: 12 },
+            WordSpan { word: "!".to_string(), start: 12, end: 13 }
+        ];
+        
+        let filters = vec![",".to_string(), "!".to_string()];
+        let result = filter_word_spans(spans, &filters, &FilterMode::Exact, false).unwrap();
+        
+        assert_eq!(result, vec![
+            WordSpan { word: ",".to_string(), start: 5, end: 6 },
+            WordSpan { word: "!".to_string(), start: 12, end: 13 }
         ]);
     }
 }

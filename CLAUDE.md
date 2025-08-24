@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Rust CLI tool that extracts word-by-word character spans from string literals in Rust source files. Given a Rust file and line number, it parses the string literal on that line and returns each word with its byte position within the string.
+A Rust CLI tool that extracts word-by-word character spans from string literals in Rust source files. Given a Rust file and line number, it parses the string literal on that line and returns each word with its byte position within the string. The tool supports flexible filtering options to show only specific tokens/words that match exact patterns, contain substrings, or match regex patterns.
 
 ## Development Commands
 
@@ -12,6 +12,38 @@ A Rust CLI tool that extracts word-by-word character spans from string literals 
 - Build the project: `cargo build`
 - Run directly: `cargo run -- <file> <line_number>`
 - Install locally: `cargo install --path .`
+
+### Usage Examples
+
+#### Basic Usage
+```bash
+# Extract spans from a string literal in a Rust file
+cargo run -- file src/main.rs 42
+
+# Process raw string content directly  
+cargo run -- string "hello world test"
+
+# Read from stdin
+echo "hello world" | cargo run -- string
+```
+
+#### Filtering Options
+```bash
+# Filter to show only specific words (exact match)
+cargo run -- --filter hello --filter world string "hello world test"
+
+# Use contains mode to match substrings
+cargo run -- --filter-mode contains --filter "orl" string "hello world wonderful"
+
+# Use regex patterns for advanced filtering
+cargo run -- --filter-mode regex --filter "w.*d" string "hello world test"
+
+# Case-insensitive filtering
+cargo run -- --filter HELLO --ignore-case string "hello world"
+
+# Combine with strings-as-tokens mode
+cargo run -- --strings-as-tokens --filter-mode contains --filter "quoted" string 'before "quoted text" after'
+```
 
 ### Testing
 - Run all tests: `cargo test`
@@ -30,8 +62,17 @@ A Rust CLI tool that extracts word-by-word character spans from string literals 
 ### Key Dependencies
 - `syn`: Rust parser for AST traversal and string literal extraction
 - `unicode-segmentation`: Proper word boundary detection for all Unicode text
-- `clap`: Command-line argument parsing
+- `clap`: Command-line argument parsing with derive features for structured CLI
 - `proc-macro2`: Required for span location information
+- `regex`: Pattern matching for regex-based filtering
+
+### Filtering System
+The tool includes a flexible filtering system that operates on extracted word spans:
+- **Exact Mode**: Match words that exactly equal the filter strings
+- **Contains Mode**: Match words that contain the filter substrings  
+- **Regex Mode**: Match words using regular expression patterns
+- **Case Sensitivity**: All modes support case-insensitive matching with `--ignore-case`
+- **Multiple Filters**: Multiple filter patterns can be specified, with OR logic (any match includes the word)
 
 ### String Processing Logic
 The tool handles various string literal types:
